@@ -1,0 +1,167 @@
+//=====[Libraries]=============================================================
+
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+#include "fire_alarm.h"
+#include "user_interface.h"
+#include "date_and_time.h"
+#include "temperature_sensor.h"
+#include "gas_sensor.h"
+#include "display.h"
+
+//=====[Declaration of private defines]========================================
+
+#define TEMPERATURE_C_LIMIT_ALARM               25.0
+#define EVENT_CONFIRMATION_DISPLAY_TIME_MS      2000
+
+//=====[Declaration of private data types]=====================================
+
+//=====[Declaration and initialization of public global objects]===============
+
+DigitalIn fireAlarmTestButton(BUTTON1);
+Timer eventDisplayTimer;
+UnbufferedSerial uart(USBTX, USBRX);
+
+//=====[Declaration of external public global variables]=======================
+
+//=====[Declaration and initialization of public global variables]=============
+
+//=====[Declaration and initialization of private global variables]============
+
+static bool gasDetected                  = OFF;
+static bool overTemperatureDetected      = OFF;
+static bool gasDetectorState             = OFF;
+static bool overTemperatureDetectorState = OFF;
+
+//=====[Declarations (prototypes) of private functions]========================
+
+static void displayEventConfirmation(const char* eventType);
+static void sendSerialAlert(const char* eventType);
+
+//=====[Implementations of public functions]===================================
+
+void fireAlarmInit()
+{
+    temperatureSensorInit();
+    gasSensorInit();
+    fireAlarmTestButton.mode(PullDown); 
+    eventDisplayTimer.stop();
+    eventDisplayTimer.reset();
+    uart.baud(115200);
+}
+
+void fireAlarmUpdate()
+{
+    static bool prevGasState = OFF;
+    static bool prevTempState = OFF;
+    
+    temperatureSensorUpdate();
+    gasSensorUpdate();
+
+    // Temperature detection
+    overTemperatureDetectorState = temperatureSensorReadCelsius() > TEMPERATURE_C_LIMIT_ALARM;
+
+    if (overTemperatureDetectorState && !prevTempState) {
+        overTemperatureDetected = ON;
+        displayEventConfirmation("HIGH TEMP");
+        sendSerialAlert("HIGH TEMPERATURE");
+    }
+    prevTempState = overTemperatureDetectorState;
+
+    // Gas detection
+    gasDetectorState = !gasSensorRead();
+
+    if (gasDetectorState && !prevGasState) {
+        gasDetected = ON;
+        displayEventConfirmation("GAS DETECTED");
+        sendSerialAlert("GAS DETECTED");
+    }
+    prevGasState = gasDetectorState;
+
+    // Test button
+    if (fireAlarmTestButton) {             
+        overTemperatureDetected = ON;
+        gasDetected = ON;
+        displayEventConfirmation("TEST ALARM");
+        sendSerialAlert("TEST ALARM");
+    }
+
+    if (eventDisplayTimer.read_ms() >= EVENT_CONFIRMATION_DISPLAY_TIME_MS) {
+        eventDisplayTimer.stop();
+        eventDisplayTimer.reset();
+        displayClear();
+    }
+}
+
+bool gasDetectorStateRead()
+{
+    return gasDetectorState;
+}
+
+bool overTemperatureDetectorStateRead()
+{
+    return overTemperatureDetectorState;
+}
+
+bool gasDetectedRead()
+{
+    return gasDetected;
+}
+
+bool overTemperatureDetectedRead()
+{
+    return overTemperatureDetected;
+}
+
+void fireAlarmDeactivate()
+{
+    overTemperatureDetected = OFF;
+    gasDetected = OFF;    
+    eventDisplayTimer.stop();
+    eventDisplayTimer.reset();
+    displayClear();
+}
+
+//=====[Implementations of private functions]==================================
+
+static void displayEventConfirmation(const char* eventType)
+{
+    // Set display to character mode
+    displayModeWrite(DISPLAY_MODE_CHAR);
+    displayClear();
+    
+    // First line of LCD
+    displayCharPositionWrite(0, 0);
+    displayStringWrite("ALERT:");
+    
+    // Second line - event type
+    displayCharPositionWrite(0, 1);
+    displayStringWrite(eventType);
+    
+    // Start the display timer
+    eventDisplayTimer.start();
+}
+
+static void sendSerialAlert(const char* eventType)
+{
+    // Get current time
+    time_t seconds = time(NULL);
+    struct tm *timeinfo = localtime(&seconds);
+    char timeStr[9];  // HH:MM:SS + null terminator
+    
+    strftime(timeStr, sizeof(timeStr), "%T", timeinfo);
+    
+    // Send alert message
+    const char* alertMsg = "[ALERT] ";
+    uart.write(alertMsg, strlen(alertMsg));
+    uart.write(eventType, strlen(eventType));
+    
+    const char* detectedAt = " detected at ";
+    uart.write(detectedAt, strlen(detectedAt));
+    
+    uart.write(timeStr, strlen(timeStr));
+    
+    const char* newline = "\r\n";
+    uart.write(newline, strlen(newline));
+}
