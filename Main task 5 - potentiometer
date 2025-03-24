@@ -1,0 +1,120 @@
+//=====[Libraries]=============================================================
+#include "mbed.h"
+#include "arm_book_lib.h"
+#include "FATFileSystem.h"
+#include "SDBlockDevice.h"
+#include <vector>
+#include <string>
+
+#include "fire_alarm.h"
+#include "user_interface.h"
+#include "date_and_time.h"
+#include "temperature_sensor.h"
+#include "gas_sensor.h"
+#include "display.h"
+#include "matrix_keypad.h"
+
+//=====[Declaration of private defines]========================================
+#define TEMPERATURE_C_LIMIT_ALARM               25.0
+#define EVENT_CONFIRMATION_DISPLAY_TIME_MS      2000
+#define MIN_SCROLL_DELAY_MS                     1000  // Slowest speed
+#define MAX_SCROLL_DELAY_MS                     100   // Fastest speed
+
+//=====[Declaration of private data types]=====================================
+
+//=====[Declaration and initialization of public global objects]===============
+DigitalIn fireAlarmTestButton(BUTTON1);
+Timer eventDisplayTimer;
+UnbufferedSerial uart(USBTX, USBRX);
+SDBlockDevice sd(SPI_MOSI, SPI_MISO, SPI_SCK, SPI_CS);
+FATFileSystem fs("fs");
+AnalogIn scrollSpeedPot(A0);  // Use your actual potentiometer pin
+
+//=====[Declaration and initialization of private global variables]============
+static bool gasDetected = OFF;
+static bool overTemperatureDetected = OFF;
+static bool gasDetectorState = OFF;
+static bool overTemperatureDetectorState = OFF;
+static int currentScrollDelay = 500;  // Default medium speed
+
+//=====[Implementations of public functions]===================================
+void fireAlarmInit() {
+    temperatureSensorInit();
+    gasSensorInit();
+    fireAlarmTestButton.mode(PullDown);
+    eventDisplayTimer.stop();
+    eventDisplayTimer.reset();
+    uart.baud(115200);
+    sd.init();
+    fs.mount(&sd);
+    
+   uart.write("Press 6 or 7 on the keypad to log a gas detection or overtemp detection event.\r\n", 78);
+}
+
+void fireAlarmUpdate() {
+    static bool prevGasState = OFF;
+    static bool prevTempState = OFF;
+    
+    // Keypad handling
+    char keyPressed = matrixKeypadUpdate();
+    if (keyPressed == 'e') {
+        displayRecentEventsSerial();
+    }
+    else if (keyPressed == '6') {
+        logToSdCard("Gas detection", true);
+        displayEventConfirmation("GAS LOGGED");
+    }
+    else if (keyPressed == '7') {
+        logToSdCard("High temperature", true);
+        displayEventConfirmation("TEMP LOGGED");
+    }
+
+    // [Rest of your existing sensor handling code...]
+}
+
+//=====[Event Logging Functions]==============================================
+static void logToSdCard(const char* eventType, bool isManual = false) {
+    time_t seconds = time(NULL);
+    char timeStr[20];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", localtime(&seconds));
+    
+    FILE* file = fopen("/fs/events.log", "a");
+    if (file != NULL) {
+        fprintf(file, "[%s] %s - %s\n", 
+               isManual ? "MANUAL" : "AUTO",
+               timeStr, 
+               eventType);
+        fclose(file);
+    }
+}
+
+static void displayRecentEventsSerial() {
+    FILE* file = fopen("/fs/events.log", "r");
+    if (file) {
+        uart.write("\r\n----- EVENT LOG (Turn Pot to Adjust Speed) -----\r\n", 52);
+        
+        // Read all lines into vector
+        std::vector<std::string> lines;
+        char line[100];
+        while (fgets(line, sizeof(line), file)) {
+            lines.push_back(line);
+        }
+        fclose(file);
+        
+        // Display with speed control
+        int startIdx = std::max(0, (int)lines.size() - 10); // Show last 10
+        for (int i = startIdx; i < lines.size(); i++) {
+            uart.write(lines[i].c_str(), lines[i].length());
+            
+            // Get scroll speed from potentiometer
+            float potValue = scrollSpeedPot.read();
+            currentScrollDelay = MAX_SCROLL_DELAY_MS + 
+                               (MIN_SCROLL_DELAY_MS - MAX_SCROLL_DELAY_MS) * potValue;
+            
+            ThisThread::sleep_for(currentScrollDelay);
+        }
+        uart.write("-------------------------------------------\r\n", 45);
+    }
+}
+
+// [Keep all your other existing functions...]
